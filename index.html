@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>WebGL Texturing</title>
+  </head>
+  <body>
+    <canvas width="500" height="500" id="webgl-canvas"></canvas>
+
+    <script src="../common/webgl-debug.js"></script>
+    <script src="../common/webgl-lint.js"></script>
+    <script src="../common/math.js"></script>
+    <script src="../common/gl-utils.js"></script>
+    <script src="../common/input.js"></script>
+    <script src="../common/renderloop.js"></script>
+    <script src="../common/camera.js"></script>
+    <script src="../common/grid.js"></script>
+    <script src="../common/dat.gui.min.js"></script>
+    <script src="../common/stats.min.js"></script>
+    <script src="../common/objparser.js"></script>
+
+    <script src="renderer.js"></script>
+    <script src="fishRenderer.js"></script>
+    <script src="seaRenderer.js"></script>
+    <script src="modeltransform.js"></script>
+    <script src="primitives.js"></script>
+
+    <script type="text/javascript">
+      "use strict"; // use strict javascript compiling
+
+      //--------------------------------------------------
+      // Global Cashes
+      //--------------------------------------------------
+      var MeshCache = {}; // here all mesh objects are stored, see GLUtils.createMesh() for details on how a mesh is added.
+      var TextureCache = {}; // here all texture objects are stored, see GLUtils.loadTexture() for details on how a texture is added.
+
+      // -----------------------------------------
+      // Global variables
+      // -----------------------------------------
+      var gl, glSea;
+      var canvas;
+      var renderLoop;
+      var eatingAudio;
+
+      var g_camera;
+      var g_cameraController;
+
+      var fish;
+      var fishPos;
+      var fishSpeed;
+      var maxSpeed;
+      var fishAcceleration;
+      var hoopWidth;
+
+      var hoopArray = [];
+      var hoopPosArray = [];
+      var hoopMat;
+
+      var speedAvg = 0.0;
+      var totalTime;
+      var score = 0;
+      var lives = 3;
+
+      var g_grid;
+
+      var g_renderer, g_fishRenderer, g_seaRenderer;
+
+      // lighting
+      var g_lightingData = {
+        directionalLight: new V3(-0.2, -0.8, -0.5).normalize(), // light direction
+        directionalColor: new V3(1.3, 1.3, 1.3), // intense light color by default white
+        ambientColor: new V3(0.02, 0.07, 0.45), // blue (the color of the sea)
+      };
+
+      // This will execute the setup function once the whole document has been loaded.
+      window.addEventListener("load", function () {
+        setup();
+      });
+
+      function addHoop(deltaTime, camera, shaderData, x, z) {
+        let hoop = new ModelTransform(Primitives.Sphere.getMesh(), hoopMat);
+        let hoopPos = new V3(x + 10.0 * Math.random() - 5.0, 0.0, z);
+        hoop.position.set(hoopPos.x, hoopPos.y, hoopPos.z);
+        hoop.scale.set(hoopWidth, 0.35, 0.2);
+        hoopArray.push(hoop);
+        hoopPosArray.push(hoopPos);
+        g_renderer.drawModel(hoop, camera, shaderData);
+      }
+
+      function updateFishMovement(deltaTime) {
+        if (Input.keyHold("arrowup") || Input.keyHold("w")) {
+          if (fishSpeed + fishAcceleration * deltaTime < maxSpeed)
+            fishSpeed += fishAcceleration * deltaTime;
+          else fishSpeed = maxSpeed;
+        }
+        if (Input.keyHold("arrowleft") || Input.keyHold("a")) {
+          let rotation = fish.rotation;
+          rotation.y += 1 * deltaTime * 90;
+          fish.rotation = rotation;
+        }
+        if (Input.keyHold("arrowright") || Input.keyHold("d")) {
+          let rotation = fish.rotation;
+          rotation.y -= 1 * deltaTime * 90;
+          fish.rotation = rotation;
+        }
+      }
+
+      function setup() {
+        canvas = document.getElementById("webgl-canvas");
+        gl = GLUtils.createWebGLInstance(canvas, true, false); // fullscreen = true, debugging = true
+        glSea = GLUtils.createWebGLInstance(canvas, true, false);
+        gl.clearColor(0.02, 0.07, 0.45, 1); // set clear color (RGBA)
+        gl.fitScreen();
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LEQUAL);
+
+        // our shader files are loaded here. Once completed, init is called
+        // for now there is only the standardShader, but you can add more by
+        // simply adding another path into the array shaderPaths.
+        let shaderPaths = [
+          "shaders/standardShader.glsl",
+          "shaders/fishShader.glsl",
+          "shaders/seaShader.glsl",
+        ];
+        GLUtils.loadShaders(shaderPaths, init);
+      }
+
+      function init() {
+        Input.initialize(canvas);
+
+        g_renderer = new Renderer("standardShader");
+        g_fishRenderer = new FishRenderer("fishShader");
+        g_seaRenderer = new SeaRenderer("seaShader");
+
+        g_camera = new PerspectiveCamera(
+          45,
+          0.1,
+          1000,
+          canvas.width / canvas.height
+        );
+        g_cameraController = new OrbiterCameraController(canvas, g_camera);
+        g_cameraController.target.set(0, 0, 0);
+        g_cameraController.distance = 10.0;
+
+        GLUtils.loadTexture("fish", "resources/fish.jpg");
+        GLUtils.loadTexture("hoop", "resources/hoop.jpg");
+        eatingAudio = new Audio("resources/eatingsound.mp3");
+
+        // Materials
+        let fishMat = {
+          tint: new V3(1.0, 1.0, 1.0),
+          mainTexture: "fish",
+        };
+
+        hoopMat = {
+          tint: new V3(1.15, 0.9, 0.3),
+          mainTexture: "hoop",
+        };
+
+        let fishMesh = OBJLoader.getMesh("fishMesh", "resources/fish.obj");
+
+        fish = new ModelTransform(fishMesh, fishMat);
+
+        fishPos = new V3(0.0, 0.0, 0.0);
+        fishSpeed = 2.0;
+        maxSpeed = 5.0;
+        fishAcceleration = 0.8;
+        hoopWidth = 0.5;
+
+        fish.position.set(fishPos.x, fishPos.y, fishPos.z);
+        fish.rotation.set(fish.rotation.x, 270, fish.rotation.z);
+        fish.scale.set(0.1, 0.1, 0.1);
+
+        g_grid = new GridAxis();
+
+        setupSeaBackground();
+        totalTime = 0.0;
+        renderLoop = new RenderLoop(draw).start();
+      }
+
+      function draw(deltaTime) {
+        Input.update();
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        // setupSeaBackground();
+
+        g_cameraController.update();
+
+        let shaderData = { lightingData: g_lightingData, time: Time.time };
+
+        if (fishSpeed - (fishAcceleration * deltaTime) / 2.0 > 0.0)
+          fishSpeed -= (fishAcceleration * deltaTime) / 2.0;
+        else fishSpeed = 0.0;
+        updateFishMovement(deltaTime);
+
+        let newPos = fish.position.addV(
+          fish.localRight.multiplyScalar(-1.0 * fishSpeed)
+        );
+        fish.position.set(newPos.x, newPos.y, newPos.z);
+        fishPos = newPos;
+
+        g_fishRenderer.drawModel(
+          fish,
+          g_camera,
+          shaderData,
+          -1.0 * fishPos.z,
+          fishSpeed
+        );
+
+        if (hoopPosArray.length <= 5) {
+          let prevHoopZLoc;
+          if (hoopPosArray.length == 0) prevHoopZLoc = 0.0;
+          else prevHoopZLoc = hoopPosArray[hoopPosArray.length - 1].z;
+          addHoop(
+            deltaTime,
+            g_camera,
+            shaderData,
+            fishPos.x,
+            prevHoopZLoc - 20.0
+          );
+        }
+
+        for (let hoopIndex in hoopArray) {
+          let hoop = hoopArray[hoopIndex];
+          hoop.update();
+          g_renderer.drawModel(hoop, g_camera, shaderData);
+
+          if (fishPos.z <= hoop.position.z) {
+            if (Math.abs(fishPos.x - hoop.position.x) <= hoopWidth + 0.5) {
+              ++score;
+              eatingAudio.currentTime = 0;
+              eatingAudio.play();
+            } else --lives;
+            hoopArray.shift();
+            hoopPosArray.shift();
+            // console.log("Food Eaten: " + score + "\n" + "Lives: " + lives);
+            // console.log(fishSpeed + " " + totalTime);
+          }
+        }
+
+        speedAvg += fishSpeed * deltaTime;
+        totalTime += deltaTime;
+
+        if (lives <= 0) {
+          endGame();
+        }
+
+        g_cameraController.target.set(fishPos.x, fishPos.y + 3.0, fishPos.z);
+
+        fish.update();
+        g_grid.draw(g_camera);
+      }
+
+      function endGame() {
+        let averageSpeed = speedAvg / totalTime;
+        console.log(
+          "Food Eaten: " +
+            score +
+            "\n" +
+            "Lives: " +
+            lives +
+            "\n" +
+            "Score: " +
+            averageSpeed * score
+        );
+        throw "YOU LOST!\nPRESS F5 TO START AGAIN!";
+      }
+
+      // Unused alternative sea background.
+      function setupSeaBackground() {
+        let positionData = new Float32Array([
+          -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0, 1.0,
+        ]);
+
+        let positionBuffer = glSea.createBuffer();
+        glSea.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        glSea.bufferData(gl.ARRAY_BUFFER, positionData, glSea.STATIC_DRAW);
+        let vertexCount = 6;
+
+        glSea.useProgram(g_seaRenderer.program);
+        // glSea.disable(glSea.DEPTH_TEST);
+
+        glSea.bindBuffer(glSea.ARRAY_BUFFER, positionBuffer);
+        var attributeLocation = glSea.getAttribLocation(
+          g_seaRenderer.program,
+          "a_position"
+        );
+        glSea.enableVertexAttribArray(attributeLocation);
+        var vertexSize = 2;
+        var type = gl.FLOAT;
+        var normalized = false;
+        var stride = Float32Array.BYTES_PER_ELEMENT * vertexSize;
+        var offset = 0;
+        glSea.vertexAttribPointer(
+          attributeLocation,
+          vertexSize,
+          type,
+          normalized,
+          stride,
+          offset
+        );
+
+        glSea.drawArrays(gl.TRIANGLES, 0, vertexCount);
+      }
+    </script>
+  </body>
+</html>
